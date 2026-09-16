@@ -1,11 +1,11 @@
 import asyncio
 import inspect
 import sys
-from enum import Enum
 from functools import partial, wraps
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import aiofiles
 from rich.box import SQUARE
 from rich.console import Console
 from rich.panel import Panel
@@ -15,23 +15,27 @@ from rich.table import Table
 from typer import Argument, Option, Typer
 
 from openstd_spider import (
+    DbbaDto,
     Gb688Dto,
     HandleCaptchaError,
+    HbbaDto,
     NotFoundError,
     OpenstdDto,
     StdListItem,
     StdMetaFull,
+    StdSamrDto,
+    StdSamrItem,
+    StdSamrSearchResult,
     StdSearchResult,
     StdStatus,
-    StdType,
     __version__,
     download_preview_img_impl,
     fuck_captcha_impl,
     reorganize_page_impl,
 )
 from openstd_spider.parse.gb688 import gb688_uniq_imgid
-from openstd_spider.pdf import async_render_pdf_impl
-from openstd_spider.utils import is_std_code, name2std_type, parse_std_id, std_status2name
+from openstd_spider.pdf import async_render_pdf_images_impl, async_render_pdf_impl
+from openstd_spider.utils import is_std_code, parse_std_id, std_status2name, tid2std_kind
 
 
 class AsyncTyper(Typer):
@@ -68,6 +72,9 @@ app = AsyncTyper(
 )
 openstd_dto = OpenstdDto()
 gb688_dto = Gb688Dto()
+stdsamr_dto = StdSamrDto()
+hbba_dto = HbbaDto()
+dbba_dto = DbbaDto()
 
 
 async def search_one(keyword: str) -> StdListItem:
@@ -84,6 +91,18 @@ async def search_one(keyword: str) -> StdListItem:
     else:
         console.print("❌[red]未查询到对应标准编号的内容")
         sys.exit(-1)
+
+
+async def search_samr_one(keyword: str) -> StdSamrItem | None:
+    "在新平台精确检索标准编号，未命中返回 None"
+    result = await stdsamr_dto.search(keyword=keyword)
+    # 优先取标准号完全一致的结果(忽略空格与大小写)
+    norm = keyword.replace(" ", "").upper()
+    for item in result.items:
+        if item.std_code.replace(" ", "").upper() == norm:
+            return item
+    # 退而求其次：仅一条结果时直接采用
+    return result.items[0] if len(result.items) == 1 else None
 
 
 async def url_or_code2std_id(target: str) -> str:
@@ -128,6 +147,73 @@ def show_std_list(result: StdSearchResult):
         )
     console.print(tb)
     console.print(f"[bold green]{result.page}/{result.total_page}[/]页 共[bold green]{result.total_item}[/]条")
+
+
+def samr_status_colored(status: str):
+    "std.samr.gov.cn 标准状态颜色显示"
+    if status == "现行":
+        color = "green"
+    elif status in ("即将实施", "正在征求意见", "正在起草", "正在批准"):
+        color = "yellow"
+    elif status in ("废止", "暂不实施"):
+        color = "red"
+    else:
+        # 平台状态取值较多，未收录的按默认色显示，避免意外状态导致报错
+        color = "white"
+    return Styled(status, color)
+
+
+def show_std_samr_list(result: StdSamrSearchResult):
+    "输出 std.samr.gov.cn 标准搜索列表"
+    tb = Table("序号", "标准编号", "标准名", "采标", "状态", "发布日期", "实施日期")
+    tb.columns[2].overflow = "fold"
+    for idx, item in enumerate(result.items):
+        tb.add_row(
+            str(idx),
+            Styled(item.std_code, "bold green"),
+            item.name_cn,
+            "是" if item.adoption else "否",
+            samr_status_colored(item.status),
+            item.pub_date.strftime("%Y-%m-%d") if item.pub_date else "无",
+            item.impl_date.strftime("%Y-%m-%d") if item.impl_date else "无",
+        )
+    console.print(tb)
+    console.print(f"[bold green]{result.page}/{result.total_page}[/]页 共[bold green]{result.total_item}[/]条")
+
+
+def show_std_samr_item(item: StdSamrItem):
+    "输出行业/地方标准详细信息(来自 std.samr.gov.cn 检索结果)"
+    tb = Table(show_header=False, show_edge=False, padding=0)
+    panel = Panel(
+        tb,
+        title=f"[red]标准号: {item.std_code}",
+        box=SQUARE,
+        title_align="left",
+        border_style="blue",
+        expand=False,
+        width=100,
+    )
+
+    tb1 = Table(show_header=False, show_edge=False, padding=0, box=None)
+    tb1.add_row("中文标准名称: ", item.name_cn)
+    tb1.add_row("英文标准名称: ", item.name_en or "无")
+    tb1.add_row("标准状态: ", samr_status_colored(item.status))
+    tb1.columns[1].overflow = "fold"
+    tb.add_row(tb1)
+
+    tb.add_section()
+
+    tb2 = Table(show_header=False, show_edge=False, padding=0)
+    tb2.add_row("[bold white]中国标准分类号（CCS）", item.ccs or "无")
+    tb2.add_row("[bold white]国际标准分类号（ICS）", item.ics or "无")
+    tb2.add_row("[bold white]发布日期", item.pub_date.strftime("%Y-%m-%d") if item.pub_date else "无")
+    tb2.add_row("[bold white]实施日期", item.impl_date.strftime("%Y-%m-%d") if item.impl_date else "无")
+    tb2.add_row("[bold white]归口单位", item.maintenance_depat or "无")
+    tb2.add_row("[bold white]采标关系", item.adoption or "无")
+    tb2.columns[1].overflow = "fold"
+    tb.add_row(tb2)
+
+    console.print(panel)
 
 
 def show_std_meta(meta: StdMetaFull, detail: bool = True):
@@ -256,40 +342,118 @@ async def download_file(std_id: str, download_path: Path):
         progress.remove_task(bar)
 
 
-class StdStatusSelect(Enum):
-    PUBLISHED = "现行"
-    TOBEIMP = "即将实施"
-    WITHDRAWN = "废止"
-    NOTIMP = "暂不实施"
+async def download_hbba(file_hash: str, download_path: Path):
+    "行业标准全文下载(站点无PDF，逐页抓取图片后重组为PDF)"
+    page_cnt = await hbba_dto.get_page_count(file_hash)
+    if page_cnt <= 0:
+        console.print("❌[bold red]未能获取全文页数")
+        sys.exit(-1)
+
+    with (
+        TemporaryDirectory(prefix="openstdspider") as tmp_dir,
+        Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn("[progress.percentage]{task.percentage:>3.0f}%[/] {task.completed}/{task.total}"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress,
+    ):
+        tmp_dir = Path(tmp_dir)
+
+        bar1 = progress.add_task("下载页面", total=page_cnt)
+        img_paths: list[Path] = []
+        for no in range(page_cnt):
+            img_data = await hbba_dto.get_page_img(file_hash, no)
+            img_file = tmp_dir / f"P_{no}.png"
+            async with aiofiles.open(img_file, "wb") as fp:
+                await fp.write(img_data)
+            img_paths.append(img_file)
+            progress.update(bar1, completed=no + 1)
+        progress.remove_task(bar1)
+        console.print(f"[green]✔ [bold green]页面获取完毕")
+
+        bar2 = progress.add_task("生成PDF", total=page_cnt)
+        await async_render_pdf_images_impl(
+            img_paths,
+            download_path,
+            lambda cnt: progress.update(bar2, completed=cnt),
+        )
+        progress.remove_task(bar2)
+        console.print(f"[green]✔ [bold green]pdf生成完毕")
 
 
-class StdTypeSelect(Enum):
-    GB = "GB"
-    GBT = "GBT"
-    GBZ = "GBZ"
+async def download_dbba(file_hash: str, download_path: Path):
+    "地方标准全文下载(站点直接提供PDF)"
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        DownloadColumn(binary_units=True),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        bar = progress.add_task("下载PDF")
+        await dbba_dto.download_pdf(
+            file_hash,
+            download_path,
+            lambda total_size, size: progress.update(bar, total=total_size, completed=size),
+        )
+        progress.remove_task(bar)
+
+
+async def download_sacinfo(item: StdSamrItem, download_path: Path):
+    "行业/地方标准下载(全文由 hbba/dbba 提供，与 openstd 链路无关)"
+    viewer = await stdsamr_dto.get_viewer_url(item.pid, item.tid)
+    if viewer is None:
+        console.print("❌[bold red]该标准未提供全文")
+        sys.exit(-1)
+    site, file_hash = viewer
+
+    if download_path.is_dir():
+        download_path /= item.std_code.replace("/", "") + ".pdf"
+
+    if site == "hbba":
+        await download_hbba(file_hash, download_path)
+    else:
+        await download_dbba(file_hash, download_path)
 
 
 @app.command(name="search")
 async def search(
     ps: int = Option(10, "--ps", show_default=False, help="每页条数", min=10, max=50),
     pn: int = Option(1, "-p", "--pn", show_default=False, help="页码", min=1),
-    std_status: StdStatusSelect | None = Option(None, "-s", "--status", show_default=False, help="标准状态"),
-    std_type: StdTypeSelect | None = Option(None, "-t", "--type", show_default=False, help="标准类型"),
+    std_status: str = Option(
+        "", "-s", "--status", show_default=False, help="标准状态(现行/即将实施/废止/正在征求意见/正在起草/正在批准)"
+    ),
+    std_nature: str = Option("", "-t", "--type", show_default=False, help="标准性质(强制性/推荐性)"),
     json_output: bool = Option(False, "-j", "--json", help="json格式输出"),
     keyword: str = Argument("", help="关键字"),
 ):
     "搜索 浏览标准文件列表"
-    result = await openstd_dto.search(
+    # 已由 std.samr.gov.cn（全国标准信息公共服务平台）替代：该平台是官方检索主站，
+    # 覆盖范围与字段均优于 openstd 列表接口（含 ICS/CCS/英文标题/采标关系等），
+    # 故下方原 openstd_dto.search 调用保留备用、不再启用。
+    # 注：若要恢复，需一并恢复文件顶部的 StdType 导入、utils 的 name2std_type 导入，
+    #     以及 StdStatusSelect/StdTypeSelect 枚举与 show_std_list 显示函数。
+    # result = await openstd_dto.search(
+    #     keyword=keyword,
+    #     std_type=StdType(name2std_type(std_type.name)) if std_type else StdType.ALL,
+    #     std_status=StdStatus(std_status.name) if std_status else StdStatus.ALL,
+    #     ps=ps,
+    #     pn=pn,
+    # )
+    result = await stdsamr_dto.search(
         keyword=keyword,
-        std_type=StdType(name2std_type(std_type.name)) if std_type else StdType.ALL,
-        std_status=StdStatus(std_status.name) if std_status else StdStatus.ALL,
+        status=std_status,
+        nature=std_nature,
         ps=ps,
         pn=pn,
     )
     if json_output:
         sys.stdout.write(result.to_json(ensure_ascii=False, separators=(",", ":")))
     else:
-        show_std_list(result)
+        show_std_samr_list(result)
 
 
 @app.command(name="info")
@@ -298,6 +462,18 @@ async def meta_info(
     target: str = Argument(help="标准编号或url", show_default=False),
 ):
     "查询标准文件元数据"
+    target = target.strip()
+
+    # 行业/地方标准不在 openstd 覆盖范围内，元数据取自新平台检索结果
+    if is_std_code(target):
+        samr_item = await search_samr_one(target)
+        if samr_item is not None and tid2std_kind(samr_item.tid) in ("hb", "db"):
+            if json_output:
+                sys.stdout.write(samr_item.to_json(ensure_ascii=False, separators=(",", ":")))
+            else:
+                show_std_samr_item(samr_item)
+            return
+
     std_id = await url_or_code2std_id(target)
     try:
         meta = await openstd_dto.get_std_meta(std_id)
@@ -322,6 +498,20 @@ async def download(
     "下载标准文件PDF"
     if download_path is None:
         download_path = Path(".")
+
+    target = target.strip()
+
+    # 行业/地方标准不在 openstd 覆盖范围内，全文由 hbba/dbba 提供。
+    # 标准类别以新平台检索结果为准(仅凭前缀无法区分，如 DB 既是地震行业标准
+    # 代号也是地方标准前缀)，故先在新平台判定类别，命中行业/地方标准即走新链路。
+    if is_std_code(target):
+        samr_item = await search_samr_one(target)
+        if samr_item is not None and tid2std_kind(samr_item.tid) in ("hb", "db"):
+            show_std_samr_item(samr_item)
+            console.print("[green]" + "─" * 30)
+            await download_sacinfo(samr_item, download_path)
+            console.print(f"[green]✔ [bold green]下载完成")
+            return
 
     std_id = await url_or_code2std_id(target)
     try:

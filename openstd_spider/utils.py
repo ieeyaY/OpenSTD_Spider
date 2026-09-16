@@ -4,7 +4,13 @@ from .schema import StdStatus, StdType
 
 PATT_STD_ID_URL = re.compile(r"^(?:https://openstd\.samr\.gov\.cn/bzgk/(?:gb|std)/newGbInfo\?hcno=)?([0-9A-Fa-f]{32})")
 
-PATT_STD_CODE = re.compile(r"^GB(/[TZ])? \S+", re.I)
+# 标准编号前缀：GB 国家标准 + 各行业标准代号；地方标准另有 2 位行政区划码(如 DB11/T)
+PATT_STD_CODE = re.compile(
+    r"^(GB|AQ|BB|CB|CH|CJ|CY|DA|DB|DL|DZ|EJ|FZ|GA|GH|GM|HB|HG|HJ|HS|HY|JB|JC|JG|JR|JT|JY|LB|LD|LS|LY|MH|MT|MZ|"
+    r"NB|NY|QB|QC|QX|RB|SB|SC|SF|SH|SJ|SL|SN|SW|SY|TD|TY|WB|WH|WJ|WM|WS|WW|XB|YB|YC|YD|YS|YY|YZ|ZY)"
+    r"(\d{2})?(/[TZ]?)? \S+",
+    re.I,
+)
 
 
 def parse_std_id(text: str) -> str | None:
@@ -54,5 +60,22 @@ def name2std_type(name: str) -> StdType | None:
             return StdType.GBT
         case "GBZ":
             return StdType.GBZ
+        case _:
+            return None
+
+
+def tid2std_kind(tid: str) -> str | None:
+    """标准类别标识 -> 简类别
+
+    gb=国家标准(全文在 openstd)、hb=行业标准(全文在 hbba)、db=地方标准(全文在 dbba)。
+    未知类别返回 None。
+    """
+    match tid:
+        case "BV_GB":
+            return "gb"
+        case "BV_HB":
+            return "hb"
+        case "BV_DB":
+            return "db"
         case _:
             return None

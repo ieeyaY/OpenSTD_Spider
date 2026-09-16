@@ -26,12 +26,30 @@ def render_pdf_impl(
     cb: Optional[Callable[[int], None]] = None,
 ):
     """渲染为PDF"""
-    page_cnt = len(page_infos)
+    img_paths = [base_dir / f"P_{page.no}.png" for page in page_infos]
+    _render_images_impl(img_paths, pdf_path, cb)
+
+
+async def async_render_pdf_images_impl(
+    img_paths: list[Path],
+    pdf_path: PathLike,
+    cb: Optional[Callable[[int], None]] = None,
+):
+    "按顺序将图片逐页渲染为PDF"
+    await asyncio.to_thread(_render_images_impl, img_paths, pdf_path, cb)
+
+
+def _render_images_impl(
+    img_paths: list[Path],
+    pdf_path: PathLike,
+    cb: Optional[Callable[[int], None]] = None,
+):
+    """按顺序将图片逐页渲染为PDF(每张一页，等比缩放居中)"""
+    page_cnt = len(img_paths)
     pdf = Canvas(str(pdf_path), pagesize=A4)
     page_w, page_h = A4
 
-    for idx, page in enumerate(page_infos, 1):
-        img_file = base_dir / f"P_{page.no}.png"
+    for idx, img_file in enumerate(img_paths, 1):
         img_reader = ImageReader(img_file)
 
         # 获取原始图片尺寸

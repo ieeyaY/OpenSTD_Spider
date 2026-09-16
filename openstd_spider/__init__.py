@@ -7,8 +7,17 @@ import aiofiles
 from .captcha import fuck_captcha
 from .exception import HandleCaptchaError, NotFoundError
 from .parse.gb688 import gb688_reorganize_page
-from .request import Gb688Dto, OpenstdDto
-from .schema import Gb688Page, StdListItem, StdMetaFull, StdSearchResult, StdStatus, StdType
+from .request import DbbaDto, Gb688Dto, HbbaDto, OpenstdDto, StdSamrDto
+from .schema import (
+    Gb688Page,
+    StdListItem,
+    StdMetaFull,
+    StdSamrItem,
+    StdSamrSearchResult,
+    StdSearchResult,
+    StdStatus,
+    StdType,
+)
 
 __version__ = "0.1.1"
 

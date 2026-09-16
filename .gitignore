@@ -156,3 +156,8 @@ cython_debug/
 .pdm-python
 .vscode
 .DS_Store
+
+# Agent
+AGENTS.md
+.claude/
+CLAUDE.md
